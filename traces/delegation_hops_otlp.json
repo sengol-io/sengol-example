@@ -1,0 +1,97 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "rag-advisor-001"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.1.0"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "e5432a741141b5160342ecbe9929220b",
+              "spanId": "4161ade71bf60500",
+              "parentSpanId": "",
+              "name": "invoke_agent rag-advisor-001",
+              "startTimeUnixNano": "1783458000000000000",
+              "endTimeUnixNano": "1783458005000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.id",
+                  "value": {
+                    "stringValue": "rag-advisor-001"
+                  }
+                }
+              ],
+              "status": {}
+            },
+            {
+              "traceId": "e5432a741141b5160342ecbe9929220b",
+              "spanId": "524163314036747a",
+              "parentSpanId": "4161ade71bf60500",
+              "name": "execute_tool knowledge_base_lookup",
+              "startTimeUnixNano": "1783458001100000000",
+              "endTimeUnixNano": "1783458002000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "knowledge_base_lookup"
+                  }
+                }
+              ],
+              "status": {}
+            },
+            {
+              "traceId": "e5432a741141b5160342ecbe9929220b",
+              "spanId": "d4911978f262872f",
+              "parentSpanId": "4161ade71bf60500",
+              "name": "execute_tool wire_transfer",
+              "startTimeUnixNano": "1783458002100000000",
+              "endTimeUnixNano": "1783458003000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "wire_transfer"
+                  }
+                }
+              ],
+              "status": {}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

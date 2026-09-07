@@ -1,0 +1,29 @@
+agent:
+  agent_id: rag-advisor-001
+  agent_version: "0.1.0"
+  model_category: LLM_AGENT
+  labels:
+    team: retail-banking
+    region: CA
+
+audit_store:
+  # Reads SENGOL_AUDIT_URI from environment. Always ApiAuditSink — records are
+  # sent to SENGOL_API_URL and signed there; there is no in-process store.
+  uri_env: SENGOL_AUDIT_URI
+
+suite:
+  name: osfi-e23-qa
+  controlbook: controlbook.yaml
+  evaluators:
+    - PIIEvaluator
+    - FaithfulnessEvaluator
+    - HallucinationEvaluator
+    - DriftMonitorPresent
+
+governance:
+  baseline_pass_rate: 0.95
+  drift_response_policy:
+    on_drift: alert_only
+    notify_compliance: true
+  drift_evidence_policy:
+    level: breach

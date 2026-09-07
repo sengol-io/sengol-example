@@ -1,0 +1,29 @@
+# Additive drift-demo config — does NOT replace sengol.yaml (the compliance gate).
+# Uses ONLY the deterministic PIIEvaluator so drift can be tripped with no API key,
+# and adds the CUSUM governance.drift block per the drift-monitoring guide.
+agent:
+  agent_id: rag-advisor-001
+  agent_version: "0.1.0"
+  model_category: LLM_AGENT
+  labels:
+    team: retail-banking
+    region: CA
+
+audit_store:
+  uri_env: SENGOL_AUDIT_URI
+
+suite:
+  name: osfi-e23-drift
+  controlbook: controlbook.yaml
+  evaluators:
+    - PIIEvaluator
+
+governance:
+  baseline_pass_rate: 0.90
+  drift:
+    enabled: true
+    cusum_threshold: 5.0
+    response_policy:
+      on_drift: alert_only
+    evidence_policy:
+      level: breach

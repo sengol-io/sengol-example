@@ -1,0 +1,37 @@
+name: Sengol Compliance Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  sengol-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Sengol compliance gate
+        uses: sengol-io/sengol-github-action@main
+        with:
+          config: sengol.yaml
+          sengol-version: ">=2.0,<3"
+          dataset-path: traces/passing_traces.jsonl
+          fail-on-gate-failure: "true"
+          repeat: "3"
+          min-pass: "2"
+        env:
+          # sengol gate --dataset-path requires an audit-store URI for dataset
+          # auto-registration (exit 2 without it). The audit store is always
+          # the API — point these at your Sengol server; there is no
+          # in-process fallback.
+          SENGOL_AUDIT_URI: ${{ secrets.SENGOL_AUDIT_URI }}
+          SENGOL_API_URL: ${{ secrets.SENGOL_API_URL }}
+          SENGOL_API_TOKEN: ${{ secrets.SENGOL_API_TOKEN }}
+          SENGOL_TENANT_ID: ${{ secrets.SENGOL_TENANT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

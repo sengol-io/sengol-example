@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: sengol
+      POSTGRES_PASSWORD: sengol
+      POSTGRES_DB: sengol
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sengol"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  sengol-api:
+    image: ghcr.io/sengol-io/sengol-api:latest
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sengol:sengol@postgres:5432/sengol
+      # Development signing key — never use in production
+      SENGOL_SIGNING_KEY: dev-signing-key-32bytes-change-it
+      # Required in Postgres mode (auth_mode=local) — server refuses to boot without it.
+      SENGOL_JWT_SIGNING_KEY: dev-jwt-signing-key-32bytes-change
+      # Enables the one-time console_admin bootstrap grant for SENGOL_TENANT_ID=acme-bank-ca.
+      SENGOL_CONSOLE_ADMIN_SECRET_acme_bank_ca: dev-admin-bootstrap-secret
+      SENGOL_ENVIRONMENT: development
+      # PSK token accepted by the API in development mode
+      SENGOL_API_TOKEN: dev-token-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  rag-advisor:
+    build: ./agent
+    ports:
+      - "3000:3000"
+    env_file: .env
+    depends_on:
+      sengol-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import httpx; httpx.get('http://localhost:3000/health').raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

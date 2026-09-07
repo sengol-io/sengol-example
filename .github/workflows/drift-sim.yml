@@ -1,0 +1,62 @@
+name: Drift Simulation
+
+# Self-driving drift demo (separate from the compliance gate in sengol.yml).
+# Posts degrading traffic to a DEPLOYED sengol-api so the CUSUM DriftDetector
+# breaches and DriftAlert fires (webhook + Console Traces → Drift).
+on:
+  schedule:
+    - cron: "0 9 * * *"          # daily drip — CUSUM accumulates over days
+  workflow_dispatch:              # on-demand "show it now"
+    inputs:
+      days:
+        description: "Degrading days to post in one go (trips drift immediately)"
+        required: false
+        default: "7"
+      count:
+        description: "Traces per batch"
+        required: false
+        default: "20"
+
+permissions:
+  contents: read
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    env:
+      SENGOL_API_URL: ${{ secrets.SENGOL_API_URL }}
+      SENGOL_API_TOKEN: ${{ secrets.SENGOL_API_TOKEN }}
+      SENGOL_TENANT_ID: ${{ secrets.SENGOL_TENANT_ID || 'acme-bank-ca' }}
+      SENGOL_AUDIT_URI: ${{ secrets.SENGOL_AUDIT_URI || 'api-server' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard — a deployed environment is required
+        run: |
+          if [ -z "$SENGOL_API_URL" ] || [ -z "$SENGOL_API_TOKEN" ]; then
+            echo "SENGOL_API_URL and SENGOL_API_TOKEN must both be set — point them at your"
+            echo "deployed sengol-api to enable. Skipping."
+            exit 0
+          fi
+      - uses: actions/setup-python@v5
+        if: env.SENGOL_API_URL != '' && env.SENGOL_API_TOKEN != ''
+        with:
+          python-version: "3.11"
+      - name: Install sengol CLI
+        if: env.SENGOL_API_URL != '' && env.SENGOL_API_TOKEN != ''
+        run: pip install --quiet sengol
+      - name: Post drifting traffic + check drift
+        if: env.SENGOL_API_URL != '' && env.SENGOL_API_TOKEN != ''
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then DAYS="${{ github.event.inputs.days }}"; else DAYS=1; fi
+          COUNT="${{ github.event.inputs.count || '20' }}"
+          for d in $(seq 1 "$DAYS"); do
+            if [ "${{ github.event_name }}" = "schedule" ]; then
+              python simulate.py --pass-rate 0.85 --count "$COUNT" --out /tmp/batch.jsonl
+            else
+              python simulate.py --day "$d" --count "$COUNT" --out /tmp/batch.jsonl
+            fi
+            echo "=== posting batch $d/$DAYS ==="
+            sengol gate --config sengol.drift.yaml --dataset-path /tmp/batch.jsonl
+          done
+          sengol check-drift --config sengol.drift.yaml --agent-id rag-advisor-001
