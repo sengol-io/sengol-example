@@ -44,10 +44,18 @@ Delegation call graphs, quotas, MCP tool-integrity and multi-tenant isolation.
 They are real and they are next; including them here trades a working suite for
 a longer one.
 
-Anything that asserts absence over a window — coverage gates, Merkle anchoring
-cadence, retention intervals, leader election, cross-replica SSE, shared
-rate-limit budget. §2.4c is right that these are unreachable from a bounded
-run; they need deployed agents on a schedule.
+Anything that asserts absence over a window — coverage gates and Merkle
+anchoring cadence. These are unreachable from a bounded run and need deployed
+agents on a schedule.
+
+A caution about the source, because it changed this list. §2.4c also names
+leader election, cross-replica SSE, shared rate-limit budget, retention
+automation and multi-tenant isolation as reasons for deployed agents.
+`STATUS.md` lists every one of those under **"Being cut"** — archived out of
+the single-tenant appliance. `REPOSITORY-RESET-2026-09.md`, a founder ruling
+of 2026-09-07, explicitly scopes the runbook's build order, and the runbook
+sections are from August. Read §2.4b/c against `STATUS.md` before treating
+anything in them as current.
 
 ## Where it lives
 
@@ -61,6 +69,15 @@ artifact that lives here.
 A new workflow stands the stack up itself — `docker compose up -d` for
 Postgres, the API on `:8080` and `rag-advisor` on `:3000` — so the suite is
 secret-free and can gate pull requests honestly.
+
+**The `sengol` CLI comes from the image, not from PyPI.** `pyproject.toml`
+declares the `sengol` console script and the image installs the package, so
+`docker compose exec sengol-api sengol gate ...` works. This matters because
+the package is not published — `https://pypi.org/pypi/sengol/json` returns 404
+— which is what makes the existing `sengol.yml` gate red on every pull
+request. `datasets` is imported lazily, inside a function, for HuggingFace
+loading only, so the extras the image already installs cover the local JSONL
+fixtures this suite uses.
 
 The suite is a Python test module that drives the same Makefile targets a human
 follows, plus a Playwright layer over the Console. It reads `SENGOL_API_URL`
@@ -143,6 +160,23 @@ when everything works. Concretely, before the suite is considered done:
 
 A test that has never been observed failing has not been shown to test
 anything.
+
+## Where this sits in the order
+
+First, because it is the only unblocked item and because it is the payload the
+later ones need. A QA stack with nothing to run in it proves nothing; this
+suite runs locally on every pull request now and points at a deployed
+environment later through the same parameterised URL.
+
+Cutting a first release comes next. It unblocks the existing gate (no
+published CLI today) and is a precondition for anything that installs released
+artifacts.
+
+The `rc` stack and the upgrade test come after that, and are deferred rather
+than descoped. `STATUS.md` records that migrations restart at `0001` and there
+is deliberately no upgrade path from 1.x, so the N-1 to N test needs two 2.x
+releases to exist. Zero have shipped. Its scope should be re-derived from
+`STATUS.md` when the time comes.
 
 ## Follow-ups, deliberately not here
 
