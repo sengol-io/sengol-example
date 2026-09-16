@@ -176,7 +176,16 @@ first release is not only about turning the existing gate green; until it ships,
 nobody who clones this repository can start the stack.
 
 The suite is a Python test module that drives the same Makefile targets a human
-follows, plus a Playwright layer over the Console. It reads `SENGOL_API_URL`
+follows, plus a Playwright layer over the Console.
+
+**Its dependencies have to come from somewhere, and today they do not exist.**
+This repository has no root `pyproject.toml` and no test requirements;
+`agent/pyproject.toml` lists the agent's runtime packages only — no pytest, no
+Playwright, no browser. Adding a test module alone makes the Console stage fail
+at import, or at browser launch, before it reaches `/traces`. The workflow
+installs a pinned test dependency set and a browser with its system libraries,
+from a `pyproject.toml` or requirements file added at the repository root so a
+human runs exactly what CI runs. It reads `SENGOL_API_URL`
 and `SENGOL_AGENT_URL` from the environment rather than hardcoding localhost.
 That single decision is what lets the identical suite later run against a
 deployed environment without a second implementation.
@@ -445,6 +454,20 @@ workflow fails at installation before posting any traffic. It moves to the
 CLI service like every other CLI invocation here. Leaving it on `pip install`
 would mean the guard fix converts a silent skip into a visible failure, which is
 worse than what it replaces.
+
+Moving it there drags two things with it, and neither is optional.
+
+`simulate.py` writes its batch to `/tmp/batch.jsonl` on the runner
+(`drift-sim.yml:53-60`), and a container has its own `/tmp`. The batch is written
+into the mounted checkout instead — the CLI service mounts that and nothing else
+— and `--dataset-path` points at the mounted location.
+
+The CLI service declares `env_file: .env`, which this workflow does not create.
+`docker compose run` fails outright on the missing file, and copying
+`.env.example` would be worse than failing: it would point the gate at a local
+API that is not running, with the development token. So `drift-sim.yml` writes
+its own `.env` from its deployed secrets before invoking the service — the same
+correction the keyed job needed, for the same reason.
 
 `drift-sim.yml` otherwise stays a scheduled post-deploy probe, with the guard
 correction. Its
