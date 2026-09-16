@@ -108,6 +108,23 @@ repointed at it so a human and CI run the identical command.
 so the extras the image already installs cover the local JSONL fixtures this
 suite uses.
 
+**The agent image has the same problem, and today it cannot be built at all.**
+`agent/Dockerfile:8-13` installs `sengol>=2.0,<3` from PyPI, which does not
+resolve, so `docker compose up --build` fails on `rag-advisor` before any health
+check runs. Sourcing the CLI from the API image does nothing for this. The agent
+image is therefore rebased on `ghcr.io/sengol-io/sengol-api:latest`, which
+already carries the package, with `fastapi`, `uvicorn`, `anthropic` and `openai`
+layered on top. Two things follow. The agent and the API provably run the same
+`sengol` build, which for an integration test is an improvement rather than a
+workaround. And the base is a build argument, so when the first release ships the
+Dockerfile goes back to a plain `pip install sengol` in one line — because a
+customer copying this repository will install from PyPI, and the reference agent
+should show them that, not this bridge.
+
+This also sharpens the ordering argument at the end of this document. Cutting a
+first release is not only about turning the existing gate green; until it ships,
+nobody who clones this repository can start the stack.
+
 The suite is a Python test module that drives the same Makefile targets a human
 follows, plus a Playwright layer over the Console. It reads `SENGOL_API_URL`
 and `SENGOL_AGENT_URL` from the environment rather than hardcoding localhost.
@@ -123,7 +140,7 @@ deployed environment without a second implementation.
 | Runtime guardrail | agent `/ask`, fake model endpoint | Clean question returns `{"answer": ...}` with the fixture text byte-for-byte; PII question returns `{"blocked": true, "reason": "<PII failure mode>"}` with the SIN absent from the body, and a signed record carries that failure mode |
 | Drift | `make check-drift` | At least one signed `DRIFT_THRESHOLD_BREACH` from the 18-row stream |
 | Console — traces | Playwright | Mint an admin token, paste it into the sidebar field, open `/traces`, a seeded record is listed and its detail shows a valid signature |
-| Console — review | Playwright | The failing traces produced a review item on Governance (`/governance`, the page the README names); decide it; reload; the decision persisted |
+| Console — review | Playwright | Open Governance (`/governance`, the page the README names) and find the review item raised by an **LLM** evaluator — the fabricated 8.5% return in `traces/failing_traces.jsonl:3`, asserted by evaluator name and failure mode, not merely "an item exists"; decide it; reload; the decision persisted |
 | Evidence | `make export-evidence` | `pack.zip` is produced |
 | Offline verification | `sengol-verify pack.zip` | Exits 0 |
 | Audit | `make verify-audit` | The latest record HMAC-verifies |
@@ -285,8 +302,12 @@ when everything works. Concretely, before the suite is considered done:
   quietly route around the thing under test, which is the mistake this design
   started out making.
 - Swapping the two agent fixtures makes both guardrail assertions red, not one.
-- Making the judge route always return `PASS` makes the Console review test red,
-  because no review item is raised.
+- Making the judge route always return `PASS` makes the Console review test red.
+  This works only because that assertion names an LLM evaluator's finding. Rows 1
+  and 2 of `traces/failing_traces.jsonl` are PII, caught deterministically by
+  `PIIEvaluator` under a CRITICAL veto (`controlbook.yaml:13-24`), so they keep
+  the review queue populated whatever the judge says. A generic "some item
+  exists" assertion would stay green with judge routing completely broken.
 - Pointing `sengol-verify` at a tampered pack makes the evidence test red.
 - Seeding nothing makes the Console tests red rather than passing on an empty
   page.
@@ -301,9 +322,12 @@ later ones need. A QA stack with nothing to run in it proves nothing; this
 suite runs locally on every pull request now and points at a deployed
 environment later through the same parameterised URL.
 
-Cutting a first release comes next. It unblocks the existing gate (no
-published CLI today) and is a precondition for anything that installs released
-artifacts.
+Cutting a first release comes next, and it matters more than the earlier draft
+of this document allowed. It is not only that the existing gate installs a CLI
+that does not exist; `agent/Dockerfile` installs the same unpublished package, so
+until a release ships, a prospect who clones this repository cannot build the
+stack the README tells them to build. Rebasing the agent image gets this suite
+running without waiting, but it is a bridge, not the answer.
 
 The `rc` stack and the upgrade test come after that, and are deferred rather
 than descoped. `STATUS.md` records that migrations restart at `0001` and there
