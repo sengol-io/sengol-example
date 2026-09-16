@@ -117,6 +117,22 @@ repointed at it so a human and CI run the identical command.
 so the extras the image already installs cover the local JSONL fixtures this
 suite uses.
 
+**`sengol-verify` is a third thing the release blocks, and the suite cannot use
+it.** README step 5 tells a reader to `pip install sengol-verify`. It is its own
+repository and its own distribution — deliberately dependency-free and separately
+licensed so an examiner with no Sengol install can verify a pack
+(`docs/introduction.mdx:53`) — and `https://pypi.org/pypi/sengol-verify/json`
+returns 404. A fresh Actions runner has no source for it, so a step invoking it
+fails with command-not-found rather than testing the pack.
+
+Until it ships, the suite verifies the pack with `sengol audit verify --offline`
+in the CLI service, which the CLI exposes as `sengol verify` and describes as
+verifying evidence offline (`sengol/cli/main.py:621,7982`). Be clear about what
+that costs: it exercises the same verification logic on the same bytes, but not
+the property the README sells, which is that a party with nothing installed but
+a 400-line package can check the evidence. That assertion is deferred to the
+release, and it is listed under follow-ups rather than quietly dropped.
+
 **The agent image has the same problem, and today it cannot be built at all.**
 `agent/Dockerfile:8-13` installs `sengol>=2.0,<3` from PyPI, which does not
 resolve, so `docker compose up --build` fails on `rag-advisor` before any health
@@ -148,10 +164,11 @@ deployed environment without a second implementation.
 | Seed | `make demo` | Signed `AuditRecord`s land for both trace sets |
 | Runtime guardrail | agent `/ask`, fake model endpoint | Clean question returns `{"answer": ...}` with the fixture text byte-for-byte; PII question returns `{"blocked": true, "reason": "<PII failure mode>"}` with the SIN absent from the body, and a signed record carries that failure mode |
 | Drift | `make check-drift` | At least one signed `DRIFT_THRESHOLD_BREACH` from the 18-row stream |
-| Console — traces | Playwright | Mint an admin token, paste it into the sidebar field, open `/traces`, a seeded record is listed and its detail shows a valid signature — and, on the fabricated 8.5% return (`traces/failing_traces.jsonl:3`), the per-evaluator scores the README promises include a **failed `FaithfulnessEvaluator`**, named |
+| Console — traces | Playwright | Mint an admin token, paste it into the sidebar field, open `/traces`, a seeded record is listed and its detail shows a valid signature — and, on the fabricated 8.5% return (`traces/failing_traces.jsonl:3`), the per-evaluator scores the README promises include a **failed `FaithfulnessEvaluator`** and a **failed `HallucinationEvaluator`**, both named |
+| Gate — LLM evaluators | `sengol gate` in the CLI service | Parsed per-evaluator outcomes for **both** judges: each fails rows 3 and 4 and passes a clean record from `traces/passing_traces.jsonl` |
 | Console — review | Playwright | Open Governance (`/governance`, the page the README names), find the pending item from the PII rows, decide it, reload, the decision persisted |
 | Evidence | `make export-evidence` | `pack.zip` is produced |
-| Offline verification | `sengol-verify pack.zip` | Exits 0 |
+| Pack verification | `sengol audit verify --offline pack.zip` in the CLI service | Exits 0 — see the note below on why this is not `sengol-verify` yet |
 | Audit | `make verify-audit` | The latest record HMAC-verifies |
 
 ## The fake model endpoint
@@ -262,11 +279,17 @@ catch is visible and editable without touching code.
 
 A scheduled workflow runs with a real key and a real judge, the agent local and
 the API deployed — AWS-SETUP-RUNBOOK §2.4c's Tier 2 shape. It guards on the key
-and endpoint being present **and on the endpoint answering** — a presence-only
-check lets a configured-but-down API through, and the first `/ask`, audit lookup
-or gate call then fails the job instead of skipping it, which is the outage
-guarantee this paragraph makes. It runs the same health probe described for
-`drift-sim.yml` below. It exits 0 when any of that fails, copying
+and endpoint being present, **on `SENGOL_API_TOKEN` being present**, and **on an
+authenticated request succeeding**. Each of those three is load-bearing. A
+presence-only check lets a configured-but-down API through, and the first `/ask`,
+audit lookup or gate call then fails the job instead of skipping it. The health
+endpoint is unauthenticated, so a health probe alone passes with no token at all
+and the authenticated audit lookup fails afterwards. And because the workflow
+copies `.env.example`, a non-empty *development* token is present locally even
+when the deployed one is not — so a bare presence test can be satisfied by a
+credential that the deployed API will reject. Only an authenticated probe
+separates "not configured" from "configured wrongly". It exits 0 when any of that
+fails, copying
 `drift-sim.yml`, so a missing secret or a downed environment skips rather than
 fails. It asserts on the response bodies rather than on `make live`'s exit code,
 for the reason given above.
@@ -382,7 +405,13 @@ when everything works. Concretely, before the suite is considered done:
   started out making.
 - Swapping the two agent fixtures makes both guardrail assertions red, not one.
 - Making the judge route always return `PASS` makes the Console **traces** test
-  red, on the named `FaithfulnessEvaluator` score.
+  red, on each named evaluator score, and makes the gate's per-evaluator
+  assertions red for both judges.
+
+- Making only the `HallucinationEvaluator` route always return `PASS` makes a
+  test red on its own. Defining its fixtures without asserting them would leave
+  that evaluator free to be unwired entirely — Faithfulness and the
+  deterministic PII findings would still produce every expected outcome.
 
   It has to be the traces test, not the review test, and this took two tries to
   get right. Rows 1 and 2 of `traces/failing_traces.jsonl` are PII, caught
@@ -425,6 +454,10 @@ releases to exist. Zero have shipped. Its scope should be re-derived from
 `STATUS.md` when the time comes.
 
 ## Follow-ups, deliberately not here
+
+Verifying the exported pack with `sengol-verify`, once that package is published.
+The suite verifies the same bytes through the `sengol` CLI in the meantime, which
+does not demonstrate the independence the README's step 5 claims.
 
 Pointing the same suite at a deployed environment post-deploy. The parameterised
 URL exists for it; wiring it is a separate change.
