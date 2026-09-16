@@ -24,7 +24,10 @@ But almost none of it is exercised by automation.
 - **Nothing runs `make live`, `test-happy` or `test-pii-fail`.** The runtime
   guardrail — a PII answer being blocked in the response path — is the
   product's headline claim and has never been exercised by CI. It is a README
-  instruction a human follows by hand.
+  instruction a human follows by hand. And running those targets would not be
+  enough on its own: they pipe `curl` through `python3 -m json.tool`
+  (`Makefile:50-59`), which checks that the reply is JSON and nothing more.
+  `test-pii-fail` succeeds whether or not the SIN was blocked.
 
 The Console is in the same position: the README's journey says "open
 `/traces`", "open Governance and decide a review item", and no automation
@@ -32,8 +35,8 @@ opens either.
 
 ## Goals
 
-Cover the README's 15-minute journey end to end, on every pull request, with
-no secrets and no dependency on any deployed environment:
+Cover the README's 15-minute journey end to end, on every pull request, with no
+real credentials and no dependency on any deployed environment:
 
 seed → inspect a trace in the Console → decide a review item → export an
 evidence pack → verify it offline, plus the PII block and drift detection.
@@ -67,8 +70,21 @@ artifact that lives here.
 ## Shape
 
 A new workflow stands the stack up itself — `docker compose up -d` for
-Postgres, the API on `:8080` and `rag-advisor` on `:3000` — so the suite is
-secret-free and can gate pull requests honestly.
+Postgres, the API on `:8080` and `rag-advisor` on `:3000` — so the suite needs
+no deployed environment and can gate pull requests honestly.
+
+**The stack needs a `.env` that is not in the repository.** `docker-compose.yml`
+declares `env_file: .env` for `rag-advisor` (line 46) and `.gitignore` lists
+`.env`; only `.env.example` is tracked. A fresh checkout therefore cannot
+`docker compose up` at all. The workflow copies `.env.example` to `.env` and
+overrides the handful of values a keyless run needs. A `make .env` target does
+the same for a human, so the README's 15-minute journey stops depending on an
+undocumented manual step.
+
+**The suite asserts on responses itself rather than shelling out to `make live`.**
+Those targets stay as human-facing demos; the suite issues the same two requests
+and asserts on the bodies. The keyed job below gets the same assertions, for the
+same reason.
 
 **The `sengol` CLI comes from the image, not from PyPI.** `pyproject.toml`
 declares the `sengol` console script and the image installs the package, so
@@ -91,7 +107,7 @@ deployed environment without a second implementation.
 |---|---|---|
 | Stack is up | compose + healthcheck | API and agent both answer before anything else runs |
 | Seed | `make demo` | Signed `AuditRecord`s land for both trace sets |
-| Runtime guardrail | agent `/ask`, stub provider | Clean question returns the answer unmodified; PII question is blocked and a signed record carries the PII failure mode |
+| Runtime guardrail | agent `/ask`, fake model endpoint | Clean question returns the fixture answer byte-for-byte; PII question returns the block message, never the SIN, and a signed record carries the PII failure mode |
 | Drift | `make check-drift` | At least one signed `DRIFT_THRESHOLD_BREACH` from the 18-row stream |
 | Console — traces | Playwright | Mint an admin token, paste it into the sidebar field, open `/traces`, a seeded record is listed and its detail shows a valid signature |
 | Console — review | Playwright | The failing traces produced a review item on Governance (`/governance`, the page the README names); decide it; reload; the decision persisted |
@@ -99,54 +115,106 @@ deployed environment without a second implementation.
 | Offline verification | `sengol-verify pack.zip` | Exits 0 |
 | Audit | `make verify-audit` | The latest record HMAC-verifies |
 
-## The stub model provider
+## The fake model endpoint
 
-`agent/main.py` reads `os.environ["ANTHROPIC_API_KEY"]` directly and raises
-`KeyError` without it, so the agent cannot serve `/ask` in a secret-free job.
-`SENGOL_MODEL_PROVIDER` already switches between Anthropic and OpenAI; this
-adds a third value, `stub`, that returns a canned answer. The canned answer is
-fixture data in the repository, not a literal in the code, so what the
-guardrail is asked to catch is visible and editable.
+`agent/main.py` reads `os.environ["ANTHROPIC_API_KEY"]` directly (line 62) and
+raises `KeyError` without it, so the agent cannot serve `/ask` in a keyless job.
+The obvious fix — a third `SENGOL_MODEL_PROVIDER=stub` branch returning a canned
+string — is wrong, and understanding why fixes the design.
 
-**This is not a convenience. It is what makes the guardrail test mean
-something.** With a real model, `test-pii-fail` asks about "John Smith account
-SIN 123456789" and the model decides what comes back. If it declines, or
-answers without repeating the number, an assertion of "the response must not
-contain the SIN" passes while proving nothing — a green test cannot be
-distinguished from a broken guardrail. The thing under test operates on model
-output, and with a real provider the output is not controlled.
+`sengol.instrument()` patches `anthropic.resources.messages.AsyncMessages.create`
+and `Messages.create` at the resource class level
+(`sengol/instrument/anthropic_patch.py:51,90-91`). The guardrail — the
+evaluators, the block decision, the signed audit record — lives *inside* that
+patched method. A provider branch that returns a string without ever calling
+`client.messages.create()` never enters it. No evaluator would run, nothing
+would be blocked, no record would be written, and the assertion "the response
+does not contain the SIN" would pass because the branch was never asked to emit
+one. That test would prove nothing at all.
 
-A stub that always emits a known SIN makes the assertion exact: given output
-containing PII, the response is blocked and a signed record carries the failure
-mode.
+So the substitution has to sit below the SDK, not above it. The agent keeps its
+Anthropic branch unchanged and the SDK is pointed at a local fake server:
 
-It bypasses no real code. The agent calls `client.messages.create(...)` and
-reads `resp.content[0].text` — non-streaming, a plain string. A stub returning
-a string enters the identical downstream path.
+```
+ANTHROPIC_BASE_URL=http://model-stub:8081
+ANTHROPIC_API_KEY=sk-ant-stub-not-a-real-key
+```
 
-**The stub is self-proving.** Both directions are asserted: a clean question
-returns the stub's answer unmodified, and the PII question is blocked. Those
-cannot both pass if the guardrail is a no-op — one would leak or the other
-would over-block. A single-direction test cannot make that claim.
+The Anthropic SDK reads `ANTHROPIC_BASE_URL` in its constructor — measured on
+`anthropic` 1.6.0: with that variable set, `AsyncAnthropic(api_key="dummy")`
+resolves `base_url` to it. **No change to `agent/main.py` is needed.** The agent
+still constructs a real client, still calls `client.messages.create()`, still
+enters the patched method, still runs the evaluators and writes the record. Only
+the upstream HTTP call is replaced.
+
+The fake server is a small service in this repository serving the Messages API
+response shape, added to `docker-compose.yml`. It returns fixtures keyed by what
+it is asked, not one canned answer:
+
+| Request contains | Fixture response |
+|---|---|
+| the HISA rate question | a clean product answer, no PII |
+| the "John Smith ... SIN" question | an answer that repeats `123456789` |
+| anything else | a clean default |
+
+**Two distinct fixtures is the point.** A stub that always emitted a SIN would
+block the clean case too, and a suite in which every request is blocked cannot
+distinguish a working guardrail from one that blocks everything. With both
+fixtures the two assertions constrain each other: the clean question must return
+the fixture text unmodified, and the PII question must be blocked. A no-op
+guardrail fails the second; a block-everything guardrail fails the first.
+
+The fixtures are JSON files in the repository, so what the guardrail is asked to
+catch is visible and editable without touching code.
 
 ## The keyed job, separately
 
-A scheduled workflow runs `make live` with a real key, the agent local and the
-API deployed — AWS-SETUP-RUNBOOK §2.4c's Tier 2 shape. It guards on the key and
-endpoint being present and exits 0 when they are not, copying `drift-sim.yml`,
-so a missing secret or a downed environment skips rather than fails.
+A scheduled workflow runs the same two requests with a real key and a real
+judge, the agent local and the API deployed — AWS-SETUP-RUNBOOK §2.4c's Tier 2
+shape. It guards on the key and endpoint being present and exits 0 when they are
+not, copying `drift-sim.yml`, so a missing secret or a downed environment skips
+rather than fails. It asserts on the response bodies rather than on `make live`'s
+exit code, for the reason given above.
 
-The two jobs prove different things and that is why both exist. The stub proves
-the governance logic, deterministically, on every PR. The keyed job proves a
-genuine provider's response still flows through that path, SDK and all — which
-is worth knowing and too non-deterministic to gate a merge.
+The two jobs prove different things and that is why both exist. The fake
+endpoint proves the governance logic — interception, evaluation, blocking,
+signing, scoring — deterministically, on every pull request. The keyed job
+proves that a genuine provider's response still flows through that path, and
+that the LLM judges return sane verdicts on real output. That is worth knowing
+and too non-deterministic to gate a merge.
 
-## Fixing the existing gate
+## The existing gate, and what pointing it at compose does not fix
 
-`sengol.yml` points at the compose stack instead of a remote server, which
-makes it secret-free and removes the per-PR dependency the runbook forbids.
-`drift-sim.yml` is unchanged; it is a scheduled post-deploy probe and already
-guards correctly.
+`sengol.yml` today runs against a remote server supplied through secrets with
+`fail-on-gate-failure: true`. Pointing it at the compose stack removes the
+dependency on someone else's environment, which is the runbook's actual
+prohibition.
+
+It does **not** by itself make the gate secret-free. `sengol.yaml`'s suite lists
+`FaithfulnessEvaluator` and `HallucinationEvaluator`; both raise `RuntimeError`
+when no judge is wired (`sengol/evaluators/llm/faithfulness.py:56`,
+`llm/hallucination.py:58`), and `controlbook.yaml`'s `judge_by_tier` points every
+tier at Anthropic, whose SDK needs `ANTHROPIC_API_KEY`. With
+`fail-on-gate-failure: true`, a keyless run fails the merge.
+
+The fake endpoint already in the stack resolves this without a second config:
+the judge client is an Anthropic client too, so the same `ANTHROPIC_BASE_URL`
+covers it, and judge verdicts arrive as fixtures.
+
+Be exact about what that buys. The per-PR gate proves the suite wiring, the
+obligation scoring, the compliance weights and the evidence chain, end to end and
+deterministically. It does **not** prove judge quality — a fixture verdict is not
+a judgment, and a fixture that always says "pass" would hide a broken judge
+prompt. That is what the keyed job is for. The distinction belongs in the
+workflow's own comments, not only here, because a green per-PR gate will
+otherwise be read as a claim it does not make.
+
+`drift-sim.yml` stays a scheduled post-deploy probe, with one correction. Its
+guard tests only whether `SENGOL_API_URL` and `SENGOL_API_TOKEN` are non-empty;
+a configured-but-unreachable endpoint gets past it and the job fails on a
+connection error — exactly the false alarm the guard exists to prevent. It gains
+a reachability probe: one request to the API health endpoint, skip on failure, so
+"not deployed" and "deployed and down" both skip rather than fail.
 
 ## How this is verified
 
@@ -154,6 +222,11 @@ Each assertion must fail when the thing it covers is broken, not merely pass
 when everything works. Concretely, before the suite is considered done:
 
 - Disabling the PII evaluator makes the guardrail test red.
+- Removing `sengol.instrument()` from `agent/main.py` makes the guardrail test
+  red. This one is not optional: it is the check that the fake endpoint did not
+  quietly route around the thing under test, which is the mistake this design
+  started out making.
+- Swapping the two fixtures makes both guardrail assertions red, not one.
 - Pointing `sengol-verify` at a tampered pack makes the evidence test red.
 - Seeding nothing makes the Console tests red rather than passing on an empty
   page.
