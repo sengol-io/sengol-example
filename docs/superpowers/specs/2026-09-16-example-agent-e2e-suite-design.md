@@ -139,8 +139,8 @@ deployed environment without a second implementation.
 | Seed | `make demo` | Signed `AuditRecord`s land for both trace sets |
 | Runtime guardrail | agent `/ask`, fake model endpoint | Clean question returns `{"answer": ...}` with the fixture text byte-for-byte; PII question returns `{"blocked": true, "reason": "<PII failure mode>"}` with the SIN absent from the body, and a signed record carries that failure mode |
 | Drift | `make check-drift` | At least one signed `DRIFT_THRESHOLD_BREACH` from the 18-row stream |
-| Console — traces | Playwright | Mint an admin token, paste it into the sidebar field, open `/traces`, a seeded record is listed and its detail shows a valid signature |
-| Console — review | Playwright | Open Governance (`/governance`, the page the README names) and find the review item raised by an **LLM** evaluator — the fabricated 8.5% return in `traces/failing_traces.jsonl:3`, asserted by evaluator name and failure mode, not merely "an item exists"; decide it; reload; the decision persisted |
+| Console — traces | Playwright | Mint an admin token, paste it into the sidebar field, open `/traces`, a seeded record is listed and its detail shows a valid signature — and, on the fabricated 8.5% return (`traces/failing_traces.jsonl:3`), the per-evaluator scores the README promises include a **failed `FaithfulnessEvaluator`**, named |
+| Console — review | Playwright | Open Governance (`/governance`, the page the README names), find the pending item from the PII rows, decide it, reload, the decision persisted |
 | Evidence | `make export-evidence` | `pack.zip` is produced |
 | Offline verification | `sengol-verify pack.zip` | Exits 0 |
 | Audit | `make verify-audit` | The latest record HMAC-verifies |
@@ -244,12 +244,20 @@ everything worked. So the assertion is conditional and covers both outcomes: if
 the provider's output contained the SIN the response must be blocked; if it did
 not, the returned answer must not contain it either. The only failure is a leak.
 
-**A keyed `sengol gate` run over the seeded traces.** Issuing `/ask` requests
-cannot exercise a judge at all. `agent/main.py:35` wires only `PIIEvaluator` into
-the runtime path; `FaithfulnessEvaluator` and `HallucinationEvaluator` are
-EvalSuite-only, by the design `controlbook.yaml:28-29` states outright. So the
-job also runs the gate with the real judge and no `JUDGE_LLM_BASE_URL` override.
-Without this step the claim below would be unsupported.
+**A keyed `sengol gate` run over the seeded traces, asserted per evaluator.**
+Issuing `/ask` requests cannot exercise a judge at all. `agent/main.py:35` wires
+only `PIIEvaluator` into the runtime path; `FaithfulnessEvaluator` and
+`HallucinationEvaluator` are EvalSuite-only, by the design `controlbook.yaml:28-29`
+states outright. So the job also runs the gate with the real judge and no
+`JUDGE_LLM_BASE_URL` override.
+
+Running it is not enough. A judge that always passes, or returns output the
+parser cannot read, still leaves the failing dataset looking correctly
+non-compliant, because the deterministic PII rows fail it on their own — the
+gate's verdict would be right for the wrong reason. So the job reads the parsed
+per-evaluator outcomes: `FaithfulnessEvaluator` must **fail** the fabricated 8.5%
+return and **pass** a clean record from `traces/passing_traces.jsonl`. Those two
+together are what supports the claim below; the gate's exit code is not.
 
 The two jobs prove different things and that is why both exist. The fake endpoint
 proves the governance logic — interception, evaluation, blocking, signing,
@@ -302,12 +310,22 @@ when everything works. Concretely, before the suite is considered done:
   quietly route around the thing under test, which is the mistake this design
   started out making.
 - Swapping the two agent fixtures makes both guardrail assertions red, not one.
-- Making the judge route always return `PASS` makes the Console review test red.
-  This works only because that assertion names an LLM evaluator's finding. Rows 1
-  and 2 of `traces/failing_traces.jsonl` are PII, caught deterministically by
-  `PIIEvaluator` under a CRITICAL veto (`controlbook.yaml:13-24`), so they keep
-  the review queue populated whatever the judge says. A generic "some item
-  exists" assertion would stay green with judge routing completely broken.
+- Making the judge route always return `PASS` makes the Console **traces** test
+  red, on the named `FaithfulnessEvaluator` score.
+
+  It has to be the traces test, not the review test, and this took two tries to
+  get right. Rows 1 and 2 of `traces/failing_traces.jsonl` are PII, caught
+  deterministically under a CRITICAL veto (`controlbook.yaml:13-24`), so they
+  keep the review queue populated whatever the judge says — a generic "an item
+  exists" assertion stays green with judge routing entirely broken. But the LLM
+  finding cannot be asserted on the review page either: `README.md:68-72` says a
+  **CRITICAL** finding lands in the review queue, and E23-3.1 is HIGH with
+  `critical_veto: false` (`controlbook.yaml:30-40`). No LLM evaluator is mapped
+  CRITICAL, so the fabricated return never produces a queue entry and a Playwright
+  step waiting for one would time out. The LLM result is visible where the README
+  says it is — in the trace detail's per-evaluator scores — so that is where it is
+  asserted. The review test decides the PII item, which is the item the README's
+  own journey decides.
 - Pointing `sengol-verify` at a tampered pack makes the evidence test red.
 - Seeding nothing makes the Console tests red rather than passing on an empty
   page.
