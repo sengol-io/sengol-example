@@ -132,10 +132,28 @@ licensed so an examiner with no Sengol install can verify a pack
 returns 404. A fresh Actions runner has no source for it, so a step invoking it
 fails with command-not-found rather than testing the pack.
 
-Until it ships, the suite verifies the pack with `sengol audit verify --offline`
-in the CLI service, which the CLI exposes as `sengol verify` and describes as
-verifying evidence offline (`sengol/cli/main.py:621,7982`). Be clear about what
-that costs: it exercises the same verification logic on the same bytes, but not
+Until it ships, the suite verifies the pack with
+`sengol audit verify --offline pack.zip` in the CLI service. Three things about
+that command are worth writing down, because each of them can be got wrong:
+
+- **`--offline` is what selects the bundle path.** The same command without it is
+  the per-record verifier the repository already uses
+  (`make verify-audit` → `sengol audit verify --record-id`, `Makefile:61-65`).
+  One command, two surfaces. `sengol verify` is a registered alias of the same
+  function (`sengol/cli/main.py:7982`), so either spelling works, but the flag is
+  not optional.
+- **`pack.zip` is JSON despite the name.** `audit export --out` is documented as
+  "Output path for bundle JSON" and `_verify_offline` does
+  `json.loads(path.read_text())` (`sengol/cli/main.py:7897`). The `.zip` name
+  comes from the README. Nothing breaks, but anyone implementing this will
+  reasonably expect an archive, so the suite should not "fix" the extension.
+- **The export must pass `--wait-for-countersign`.** The durable countersign
+  outbox drains asynchronously, so a bundle exported straight after seeding can
+  verify as UNVERIFIABLE for timing alone — and the CLI's own note says the
+  remedy is to re-export, not to re-verify, so a retry loop around `verify` would
+  never converge. `--wait-timeout` bounds it.
+
+Be clear about what the substitution costs: it exercises the same verification logic on the same bytes, but not
 the property the README sells, which is that a party with nothing installed but
 a 400-line package can check the evidence. That assertion is deferred to the
 release, and it is listed under follow-ups rather than quietly dropped.
@@ -337,6 +355,18 @@ per-evaluator outcomes: `FaithfulnessEvaluator` must **fail** the fabricated 8.5
 return and **pass** a clean record from `traces/passing_traces.jsonl`. Those two
 together are what supports the claim below; the gate's exit code is not.
 
+**The deployed values have to reach the containers, not just the job.** Both
+`rag-advisor` and the CLI service read their configuration from `.env`, which
+this workflow copies from `.env.example` — where `SENGOL_API_URL` is
+`http://sengol-api:8080`, the token is the development one and the Anthropic key
+is blank. Exporting secrets in the Actions job does not override an `env_file`
+entry inside a Compose container. Left as that, the guard's probe would
+authenticate against the deployed API while the agent wrote to the local one and
+the gate ran without a judge key, and the correlated-record assertion below would
+fail for a reason that has nothing to do with instrumentation. So the keyed job
+writes its values into `.env` before `compose up`, and the guard probes the same
+endpoint the containers will use.
+
 **A fresh signed record for each keyed `/ask`, correlated by a run id.** Without
 this the job does not prove what it claims. When the real provider answers
 safely, both response assertions stay green even with `sengol.instrument()`
@@ -407,7 +437,17 @@ prompt. That is what the keyed job is for. The distinction belongs in the
 workflow's own comments, not only here, because a green per-PR gate will
 otherwise be read as a claim it does not make.
 
-`drift-sim.yml` stays a scheduled post-deploy probe, with one correction. Its
+`drift-sim.yml` needs a second change beyond its guard. Step
+`.github/workflows/drift-sim.yml:44-46` runs `pip install --quiet sengol`, and
+this design has already established that the distribution is unpublished — so
+once the guard is fixed and a configured, reachable environment gets past it, the
+workflow fails at installation before posting any traffic. It moves to the
+CLI service like every other CLI invocation here. Leaving it on `pip install`
+would mean the guard fix converts a silent skip into a visible failure, which is
+worse than what it replaces.
+
+`drift-sim.yml` otherwise stays a scheduled post-deploy probe, with the guard
+correction. Its
 guard tests only whether `SENGOL_API_URL` and `SENGOL_API_TOKEN` are non-empty;
 a configured-but-unreachable endpoint gets past it and the job fails on a
 connection error — exactly the false alarm the guard exists to prevent. It gains
