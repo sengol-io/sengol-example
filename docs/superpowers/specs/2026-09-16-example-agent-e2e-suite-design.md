@@ -91,8 +91,9 @@ suite's first step waits on all three services rather than two.
 
 **The suite asserts on responses itself rather than shelling out to `make live`.**
 Those targets stay as human-facing demos; the suite issues the same two requests
-and asserts on the bodies. The keyed job below gets the same assertions, for the
-same reason.
+and asserts on the bodies. The keyed job below asserts on bodies too, for the
+same reason, but **not the same assertions** — its criteria are set out in its
+own section, because a real provider's wording is not ours to predict.
 
 **The `sengol` CLI comes from the image, not from PyPI.** The package is not
 published — `https://pypi.org/pypi/sengol/json` returns 404 — which is what makes
@@ -282,14 +283,37 @@ per-evaluator outcomes: `FaithfulnessEvaluator` must **fail** the fabricated 8.5
 return and **pass** a clean record from `traces/passing_traces.jsonl`. Those two
 together are what supports the claim below; the gate's exit code is not.
 
-**A fresh signed record for each keyed `/ask`.** Without this the job does not
-prove what it claims. When the real provider answers safely, both response
-assertions stay green even with `sengol.instrument()` removed entirely — `/ask`
-returns the safe text either way and no block is expected — and the keyed gate
-cannot cover the gap, because it evaluates pre-recorded fixture traces, not these
-two requests. So the job requires a signed runtime `AuditRecord` attributable to
-each keyed call, matched by prompt and timestamp. That record is the evidence the
-request went through the instrumented path; the response body is not.
+**A fresh signed record for each keyed `/ask`, correlated by a run id.** Without
+this the job does not prove what it claims. When the real provider answers
+safely, both response assertions stay green even with `sengol.instrument()`
+removed entirely — `/ask` returns the safe text either way and no block is
+expected — and the keyed gate cannot cover the gap, because it evaluates
+pre-recorded fixture traces, not these two requests. So the job requires a signed
+runtime `AuditRecord` for each keyed call.
+
+Prompt and timestamp are not enough to attribute one. This job points at the
+**shared deployed** API, where `drift-sim.yml` and any manual dispatch send the
+same two static prompts; an overlapping run could supply a record inside the same
+window while this run's instrumentation is broken, which is the exact blind spot
+the record is meant to close. So each call carries a run id — a nonce appended to
+the question text, which lands verbatim in the signed record's prompt field — and
+the assertion requires a record bearing that id. Putting it in the prompt rather
+than in `agent_version` is deliberate: the version field means which build
+produced the record, and a per-run value there would be a lie in evidence a bank
+reads.
+
+**And the clean case needs a criterion a real model can meet.** The deterministic
+suite compares the clean answer byte-for-byte against the fixture; a legitimate
+model paraphrases, so importing that check here fails the job for a response that
+was safe and correctly instrumented. The keyed criterion is instead: a non-empty
+answer, free of the SIN, plus its correlated signed record. The PII case is the
+conditional one described above.
+
+**Both LLM judges, not one.** `sengol.yaml` runs `FaithfulnessEvaluator` and
+`HallucinationEvaluator`, and the claim below is about the judges plural. Naming
+only Faithfulness would let Hallucination be unwired, emit unparseable output, or
+always pass with both assertions still green. So the keyed gate asserts parsed
+outcomes for each of them, on a clean record and on a fabricated one.
 
 The two jobs prove different things and that is why both exist. The fake endpoint
 proves the governance logic — interception, evaluation, blocking, signing,
