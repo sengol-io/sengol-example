@@ -81,6 +81,14 @@ overrides the handful of values a keyless run needs. A `make .env` target does
 the same for a human, so the README's 15-minute journey stops depending on an
 undocumented manual step.
 
+**The agent must not start before the model stub is listening.** `rag-advisor`'s
+healthcheck calls its own `/health`, which never touches the model endpoint, and
+its `depends_on` names only `sengol-api`. So on a cold start the agent can report
+healthy while the stub is still binding, and the first `/ask` fails on an
+upstream connection error a second before the stack would have worked. The stub
+gets its own healthcheck, `rag-advisor` depends on it being healthy, and the
+suite's first step waits on all three services rather than two.
+
 **The suite asserts on responses itself rather than shelling out to `make live`.**
 Those targets stay as human-facing demos; the suite issues the same two requests
 and asserts on the bodies. The keyed job below gets the same assertions, for the
@@ -135,7 +143,7 @@ deployed environment without a second implementation.
 
 | Step | Driven by | Assertion |
 |---|---|---|
-| Stack is up | compose + healthcheck | API and agent both answer before anything else runs |
+| Stack is up | compose + healthchecks | API, **model stub** and agent all answer before anything else runs |
 | Seed | `make demo` | Signed `AuditRecord`s land for both trace sets |
 | Runtime guardrail | agent `/ask`, fake model endpoint | Clean question returns `{"answer": ...}` with the fixture text byte-for-byte; PII question returns `{"blocked": true, "reason": "<PII failure mode>"}` with the SIN absent from the body, and a signed record carries that failure mode |
 | Drift | `make check-drift` | At least one signed `DRIFT_THRESHOLD_BREACH` from the 18-row stream |
@@ -208,10 +216,25 @@ JUDGE_LLM_BASE_URL=http://model-stub:8081/judge    # the evaluators' verdicts
 
 The judge route returns the exact three-line shape the strict parser requires —
 `VERDICT: PASS|FAIL`, `REASON:`, `CONFIDENCE:` — and, like the agent route,
-returns different fixtures for different inputs: `PASS` for the clean seeded
-traces and `FAIL` for the ones seeded to fail. That second fixture is not
-decoration; the Console review assertion below depends on failing traces
-actually producing a review item, which an always-`PASS` judge would never do.
+returns different fixtures for different inputs.
+
+**It keys on the record and the evaluator, never on which file the record came
+from.** "Everything in `failing_traces.jsonl` gets `FAIL`" is wrong and would
+quietly hollow out the suite. Row 5 of that file is a straightforward GIC answer
+that fabricates nothing; it is in the failing set because its
+`drift_monitor_enabled` is `false`, which is `DriftMonitorPresent`'s business and
+not the judge's. A fixture that failed it on faithfulness would write a finding
+the record does not deserve, and the per-evaluator assertions and the compliance
+roll-up would then be measuring my fixture routing rather than the suite's
+wiring. So the fixture table lists the verdict each record actually warrants:
+`FaithfulnessEvaluator` fails rows 3 and 4, the fabricated 8.5% return and the
+fabricated promotional mortgage rate, and passes everything else including row 5
+and all of `passing_traces.jsonl`.
+
+The `FAIL` fixture is not decoration: the Console **traces** assertion below
+requires a named failed `FaithfulnessEvaluator` on row 3, which an always-`PASS`
+judge would never produce. It is not what raises the review item — rows 1 and 2
+do that deterministically, whatever the judge says.
 
 **Two distinct fixtures is the point.** A stub that always emitted a SIN would
 block the clean case too, and a suite in which every request is blocked cannot
@@ -258,6 +281,15 @@ gate's verdict would be right for the wrong reason. So the job reads the parsed
 per-evaluator outcomes: `FaithfulnessEvaluator` must **fail** the fabricated 8.5%
 return and **pass** a clean record from `traces/passing_traces.jsonl`. Those two
 together are what supports the claim below; the gate's exit code is not.
+
+**A fresh signed record for each keyed `/ask`.** Without this the job does not
+prove what it claims. When the real provider answers safely, both response
+assertions stay green even with `sengol.instrument()` removed entirely — `/ask`
+returns the safe text either way and no block is expected — and the keyed gate
+cannot cover the gap, because it evaluates pre-recorded fixture traces, not these
+two requests. So the job requires a signed runtime `AuditRecord` attributable to
+each keyed call, matched by prompt and timestamp. That record is the evidence the
+request went through the instrumented path; the response body is not.
 
 The two jobs prove different things and that is why both exist. The fake endpoint
 proves the governance logic — interception, evaluation, blocking, signing,
