@@ -81,12 +81,30 @@ overrides the handful of values a keyless run needs. A `make .env` target does
 the same for a human, so the README's 15-minute journey stops depending on an
 undocumented manual step.
 
+**But the stub overrides stay workflow-scoped.** If `make .env` wrote
+`ANTHROPIC_BASE_URL` and `JUDGE_LLM_BASE_URL` alongside the dummy key, a reader
+who follows the README and replaces only `ANTHROPIC_API_KEY` would still be
+talking to the fake server — the SDK honours the base URL independently of the
+key — and `make live`, which `Makefile:25-27` describes as the one target that
+needs a real key, would quietly prove nothing. That is a worse failure than the
+one the target fixes, because it is silent and it happens to a prospect. `make
+.env` produces the plain `.env.example` copy; the workflow adds the stub
+endpoints on top, and the real-provider targets have an explicit way to clear
+them.
+
 A target alone does not fix the journey, though. `README.md:9` opens with
 `docker compose up -d && make seed`, so Compose evaluates the missing `env_file`
 and fails before any Make target could have created it. Startup routes through a
 `make up` target that depends on `.env`, and the README's step 1 calls that. The
 fresh-checkout journey is the claim; a target nobody invokes does not deliver
 it.
+
+**Every audit-record assertion polls, in both jobs.** The keyed job's bounded
+retry is described below, but the requirement is not specific to it:
+`agent/main.py:24-26` sends records through the same asynchronous WAL and replay
+path locally, and line 87 guarantees only that a blocked record was enqueued
+before the response returned. A one-shot check after `/ask` in the keyless suite
+fails for timing while interception worked perfectly.
 
 **The agent must not start before the model stub is listening.** `rag-advisor`'s
 healthcheck calls its own `/health`, which never touches the model endpoint, and
@@ -163,8 +181,13 @@ release, and it is listed under follow-ups rather than quietly dropped.
 resolve, so `docker compose up --build` fails on `rag-advisor` before any health
 check runs. Sourcing the CLI from the API image does nothing for this. The agent
 image is therefore rebased on `ghcr.io/sengol-io/sengol-api:latest`, which
-already carries the package, with `fastapi`, `uvicorn`, `anthropic` and `openai`
-layered on top. Two things follow. The agent and the API provably run the same
+already carries the package, with `fastapi`, `uvicorn`, `anthropic`, `openai`
+**and `httpx`** layered on top. `httpx` is not a detail:
+`docker-compose.yml:51` runs the agent's healthcheck as
+`python3 -c "import httpx; ..."`, so if the base image happens not to carry it
+the agent never becomes healthy and the suite never starts. Both the current
+Dockerfile and `agent/pyproject.toml` declare it directly today; the rebase must
+keep declaring it rather than inherit it by luck. Two things follow. The agent and the API provably run the same
 `sengol` build, which for an integration test is an improvement rather than a
 workaround. And the base is a build argument, so when the first release ships the
 Dockerfile goes back to a plain `pip install sengol` in one line — because a
@@ -196,7 +219,7 @@ deployed environment without a second implementation.
 |---|---|---|
 | Stack is up | compose + healthchecks | API, **model stub** and agent all answer before anything else runs |
 | Seed | `make demo` | Signed `AuditRecord`s land for both trace sets |
-| Runtime guardrail | agent `/ask`, fake model endpoint | Clean question returns `{"answer": ...}` with the fixture text byte-for-byte; PII question returns `{"blocked": true, "reason": "<PII failure mode>"}` with the SIN absent from the body, and a signed record carries that failure mode |
+| Runtime guardrail | agent `/ask`, fake model endpoint (record polled, not asserted once) | Clean question returns `{"answer": ...}` with the fixture text byte-for-byte; PII question returns `{"blocked": true, "reason": "<PII failure mode>"}` with the SIN absent from the body, and a signed record carries that failure mode |
 | Drift | `make check-drift` | At least one signed `DRIFT_THRESHOLD_BREACH` from the 18-row stream |
 | Console — traces | Playwright | Mint an admin token, paste it into the sidebar field, open `/traces`, a seeded record is listed and its detail shows a valid signature — and, on the fabricated 8.5% return (`traces/failing_traces.jsonl:3`), the per-evaluator scores the README promises include a **failed `FaithfulnessEvaluator`** and a **failed `HallucinationEvaluator`**, both named |
 | Gate — LLM evaluators | `sengol gate` in the CLI service | Parsed per-evaluator outcomes for **both** judges: each fails rows 3 and 4 and passes a clean record from `traces/passing_traces.jsonl` |
