@@ -227,10 +227,21 @@ that fabricates nothing; it is in the failing set because its
 not the judge's. A fixture that failed it on faithfulness would write a finding
 the record does not deserve, and the per-evaluator assertions and the compliance
 roll-up would then be measuring my fixture routing rather than the suite's
-wiring. So the fixture table lists the verdict each record actually warrants:
-`FaithfulnessEvaluator` fails rows 3 and 4, the fabricated 8.5% return and the
-fabricated promotional mortgage rate, and passes everything else including row 5
-and all of `passing_traces.jsonl`.
+wiring. So the fixture table lists the verdict each record actually warrants,
+**per evaluator**:
+
+| Evaluator | `FAIL` on | `PASS` on |
+|---|---|---|
+| `FaithfulnessEvaluator` | rows 3 and 4 — the fabricated 8.5% return and the fabricated promotional mortgage rate | everything else, row 5 and all of `passing_traces.jsonl` included |
+| `HallucinationEvaluator` | rows 3 and 4, for the same fabrications | everything else |
+
+Both evaluators need their own entries, not one shared route.
+`sengol.yaml` runs both, and a route that answered every `HallucinationEvaluator`
+request with a default `PASS` would leave that evaluator's wiring or prompt
+entirely broken while the suite and the always-`PASS` mutation check below both
+stayed green — while a malformed default would instead fail every clean gate run.
+The keyed job cannot cover this: it uses the real judge and never touches this
+route.
 
 The `FAIL` fixture is not decoration: the Console **traces** assertion below
 requires a named failed `FaithfulnessEvaluator` on row 3, which an always-`PASS`
@@ -251,7 +262,11 @@ catch is visible and editable without touching code.
 
 A scheduled workflow runs with a real key and a real judge, the agent local and
 the API deployed — AWS-SETUP-RUNBOOK §2.4c's Tier 2 shape. It guards on the key
-and endpoint being present and exits 0 when they are not, copying
+and endpoint being present **and on the endpoint answering** — a presence-only
+check lets a configured-but-down API through, and the first `/ask`, audit lookup
+or gate call then fails the job instead of skipping it, which is the outage
+guarantee this paragraph makes. It runs the same health probe described for
+`drift-sim.yml` below. It exits 0 when any of that fails, copying
 `drift-sim.yml`, so a missing secret or a downed environment skips rather than
 fails. It asserts on the response bodies rather than on `make live`'s exit code,
 for the reason given above.
