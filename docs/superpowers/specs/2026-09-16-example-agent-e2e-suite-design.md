@@ -86,14 +86,27 @@ Those targets stay as human-facing demos; the suite issues the same two requests
 and asserts on the bodies. The keyed job below gets the same assertions, for the
 same reason.
 
-**The `sengol` CLI comes from the image, not from PyPI.** `pyproject.toml`
-declares the `sengol` console script and the image installs the package, so
-`docker compose exec sengol-api sengol gate ...` works. This matters because
-the package is not published — `https://pypi.org/pypi/sengol/json` returns 404
-— which is what makes the existing `sengol.yml` gate red on every pull
-request. `datasets` is imported lazily, inside a function, for HuggingFace
-loading only, so the extras the image already installs cover the local JSONL
-fixtures this suite uses.
+**The `sengol` CLI comes from the image, not from PyPI.** The package is not
+published — `https://pypi.org/pypi/sengol/json` returns 404 — which is what makes
+the existing `sengol.yml` gate red on every pull request. The image installs the
+package and `pyproject.toml` declares the `sengol` console script, so the binary
+is there.
+
+Getting at it needs its own compose service, not `exec` into `sengol-api`. That
+service has no bind mount, so the CLI would run against the image filesystem with
+none of this repository's `sengol.yaml`, `controlbook.yaml` or `traces/*.jsonl`
+visible; and its environment carries only `DATABASE_URL`, the signing keys and
+`SENGOL_API_TOKEN` — no `SENGOL_API_URL`, `SENGOL_AUDIT_URI`, `SENGOL_TENANT_ID`
+or `ANTHROPIC_*` (`docker-compose.yml:18-32`). The gate exits 2 without the
+audit-store URI. So `docker-compose.yml` gains a `sengol-cli` service on the same
+image with the checkout bind-mounted, `env_file: .env`, and
+`profiles: ["cli"]` so `docker compose up` does not start it. Every CLI step is
+`docker compose run --rm sengol-cli sengol ...`, and the Makefile targets are
+repointed at it so a human and CI run the identical command.
+
+`datasets` is imported lazily, inside a function, for HuggingFace loading only,
+so the extras the image already installs cover the local JSONL fixtures this
+suite uses.
 
 The suite is a Python test module that drives the same Makefile targets a human
 follows, plus a Playwright layer over the Console. It reads `SENGOL_API_URL`
@@ -107,7 +120,7 @@ deployed environment without a second implementation.
 |---|---|---|
 | Stack is up | compose + healthcheck | API and agent both answer before anything else runs |
 | Seed | `make demo` | Signed `AuditRecord`s land for both trace sets |
-| Runtime guardrail | agent `/ask`, fake model endpoint | Clean question returns the fixture answer byte-for-byte; PII question returns the block message, never the SIN, and a signed record carries the PII failure mode |
+| Runtime guardrail | agent `/ask`, fake model endpoint | Clean question returns `{"answer": ...}` with the fixture text byte-for-byte; PII question returns `{"blocked": true, "reason": "<PII failure mode>"}` with the SIN absent from the body, and a signed record carries that failure mode |
 | Drift | `make check-drift` | At least one signed `DRIFT_THRESHOLD_BREACH` from the 18-row stream |
 | Console — traces | Playwright | Mint an admin token, paste it into the sidebar field, open `/traces`, a seeded record is listed and its detail shows a valid signature |
 | Console — review | Playwright | The failing traces produced a review item on Governance (`/governance`, the page the README names); decide it; reload; the decision persisted |
@@ -136,7 +149,7 @@ So the substitution has to sit below the SDK, not above it. The agent keeps its
 Anthropic branch unchanged and the SDK is pointed at a local fake server:
 
 ```
-ANTHROPIC_BASE_URL=http://model-stub:8081
+ANTHROPIC_BASE_URL=http://model-stub:8081/agent
 ANTHROPIC_API_KEY=sk-ant-stub-not-a-real-key
 ```
 
@@ -157,6 +170,32 @@ it is asked, not one canned answer:
 | the "John Smith ... SIN" question | an answer that repeats `123456789` |
 | anything else | a clean default |
 
+**Agent traffic and judge traffic get separate routes.** The same endpoint also
+serves the LLM-judge evaluators (see the gate section below), and a judge call is
+not an agent call: it carries a compliance criterion and expects a verdict back,
+in a strict format. Routing both through one table would hand a judge prompt
+containing the HISA question the product answer, which `parse_judge_response`
+rejects outright (`sengol/judges/_prompt.py:52-70`).
+
+No prompt-sniffing is needed, because the two clients already have separate
+configuration. `AnthropicJudgeClient` reads `JUDGE_LLM_BASE_URL`
+(`sengol/judges/anthropic.py:63`), distinct from the SDK-wide
+`ANTHROPIC_BASE_URL` the agent uses. The Anthropic SDK preserves a path prefix on
+`base_url` — measured on 1.6.0: `base_url="http://host/judge"` resolves to
+`http://host/judge/v1/messages` — so one service serves both:
+
+```
+ANTHROPIC_BASE_URL=http://model-stub:8081/agent    # the agent's answers
+JUDGE_LLM_BASE_URL=http://model-stub:8081/judge    # the evaluators' verdicts
+```
+
+The judge route returns the exact three-line shape the strict parser requires —
+`VERDICT: PASS|FAIL`, `REASON:`, `CONFIDENCE:` — and, like the agent route,
+returns different fixtures for different inputs: `PASS` for the clean seeded
+traces and `FAIL` for the ones seeded to fail. That second fixture is not
+decoration; the Console review assertion below depends on failing traces
+actually producing a review item, which an always-`PASS` judge would never do.
+
 **Two distinct fixtures is the point.** A stub that always emitted a SIN would
 block the clean case too, and a suite in which every request is blocked cannot
 distinguish a working guardrail from one that blocks everything. With both
@@ -169,19 +208,38 @@ catch is visible and editable without touching code.
 
 ## The keyed job, separately
 
-A scheduled workflow runs the same two requests with a real key and a real
-judge, the agent local and the API deployed — AWS-SETUP-RUNBOOK §2.4c's Tier 2
-shape. It guards on the key and endpoint being present and exits 0 when they are
-not, copying `drift-sim.yml`, so a missing secret or a downed environment skips
-rather than fails. It asserts on the response bodies rather than on `make live`'s
-exit code, for the reason given above.
+A scheduled workflow runs with a real key and a real judge, the agent local and
+the API deployed — AWS-SETUP-RUNBOOK §2.4c's Tier 2 shape. It guards on the key
+and endpoint being present and exits 0 when they are not, copying
+`drift-sim.yml`, so a missing secret or a downed environment skips rather than
+fails. It asserts on the response bodies rather than on `make live`'s exit code,
+for the reason given above.
 
-The two jobs prove different things and that is why both exist. The fake
-endpoint proves the governance logic — interception, evaluation, blocking,
-signing, scoring — deterministically, on every pull request. The keyed job
-proves that a genuine provider's response still flows through that path, and
-that the LLM judges return sane verdicts on real output. That is worth knowing
-and too non-deterministic to gate a merge.
+It does two things, because one is not enough.
+
+**The two `/ask` requests, with the block assertion conditioned on the output.**
+The deterministic suite can demand that the PII question be blocked because it
+controls what the model says. Here it does not. A real model told to answer only
+from retrieved context may quite correctly decline, or answer without repeating
+the number — and then the PII evaluator passes the safe output, `/ask` returns an
+unblocked answer, and a flat "must be blocked" assertion fails a job in which
+everything worked. So the assertion is conditional and covers both outcomes: if
+the provider's output contained the SIN the response must be blocked; if it did
+not, the returned answer must not contain it either. The only failure is a leak.
+
+**A keyed `sengol gate` run over the seeded traces.** Issuing `/ask` requests
+cannot exercise a judge at all. `agent/main.py:35` wires only `PIIEvaluator` into
+the runtime path; `FaithfulnessEvaluator` and `HallucinationEvaluator` are
+EvalSuite-only, by the design `controlbook.yaml:28-29` states outright. So the
+job also runs the gate with the real judge and no `JUDGE_LLM_BASE_URL` override.
+Without this step the claim below would be unsupported.
+
+The two jobs prove different things and that is why both exist. The fake endpoint
+proves the governance logic — interception, evaluation, blocking, signing,
+scoring — deterministically, on every pull request. The keyed job proves that a
+genuine provider's response still flows through that path, and that the LLM
+judges return sane verdicts on real output. That is worth knowing and too
+non-deterministic to gate a merge.
 
 ## The existing gate, and what pointing it at compose does not fix
 
@@ -198,8 +256,8 @@ tier at Anthropic, whose SDK needs `ANTHROPIC_API_KEY`. With
 `fail-on-gate-failure: true`, a keyless run fails the merge.
 
 The fake endpoint already in the stack resolves this without a second config:
-the judge client is an Anthropic client too, so the same `ANTHROPIC_BASE_URL`
-covers it, and judge verdicts arrive as fixtures.
+`JUDGE_LLM_BASE_URL` points the judge client at its own route on that server, and
+verdicts arrive as fixtures.
 
 Be exact about what that buys. The per-PR gate proves the suite wiring, the
 obligation scoring, the compliance weights and the evidence chain, end to end and
@@ -226,7 +284,9 @@ when everything works. Concretely, before the suite is considered done:
   red. This one is not optional: it is the check that the fake endpoint did not
   quietly route around the thing under test, which is the mistake this design
   started out making.
-- Swapping the two fixtures makes both guardrail assertions red, not one.
+- Swapping the two agent fixtures makes both guardrail assertions red, not one.
+- Making the judge route always return `PASS` makes the Console review test red,
+  because no review item is raised.
 - Pointing `sengol-verify` at a tampered pack makes the evidence test red.
 - Seeding nothing makes the Console tests red rather than passing on an empty
   page.
