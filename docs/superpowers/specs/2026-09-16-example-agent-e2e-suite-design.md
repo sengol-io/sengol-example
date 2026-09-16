@@ -81,6 +81,13 @@ overrides the handful of values a keyless run needs. A `make .env` target does
 the same for a human, so the README's 15-minute journey stops depending on an
 undocumented manual step.
 
+A target alone does not fix the journey, though. `README.md:9` opens with
+`docker compose up -d && make seed`, so Compose evaluates the missing `env_file`
+and fails before any Make target could have created it. Startup routes through a
+`make up` target that depends on `.env`, and the README's step 1 calls that. The
+fresh-checkout journey is the claim; a target nobody invokes does not deliver
+it.
+
 **The agent must not start before the model stub is listening.** `rag-advisor`'s
 healthcheck calls its own `/health`, which never touches the model endpoint, and
 its `depends_on` names only `sengol-api`. So on a cold start the agent can report
@@ -288,8 +295,17 @@ and the authenticated audit lookup fails afterwards. And because the workflow
 copies `.env.example`, a non-empty *development* token is present locally even
 when the deployed one is not — so a bare presence test can be satisfied by a
 credential that the deployed API will reject. Only an authenticated probe
-separates "not configured" from "configured wrongly". It exits 0 when any of that
-fails, copying
+separates "not configured" from "configured wrongly".
+
+**And the guard has to publish its result, not merely exit 0.** In GitHub Actions
+`exit 0` ends the step successfully and the job carries on, so a guard that only
+exits cannot skip anything. `drift-sim.yml:40-49` shows the shape of the bug: its
+later steps are conditioned on the two variables being non-empty, so a present
+but unreachable endpoint sails past the guard and fails the steps after it. The
+probe sets an output that every subsequent step checks, in both workflows. This
+is the correction to the reachability fix two rounds ago, which added the probe
+and left the skip unimplemented. Guarded that way it skips rather than fails,
+copying
 `drift-sim.yml`, so a missing secret or a downed environment skips rather than
 fails. It asserts on the response bodies rather than on `make live`'s exit code,
 for the reason given above.
@@ -327,7 +343,12 @@ safely, both response assertions stay green even with `sengol.instrument()`
 removed entirely — `/ask` returns the safe text either way and no block is
 expected — and the keyed gate cannot cover the gap, because it evaluates
 pre-recorded fixture traces, not these two requests. So the job requires a signed
-runtime `AuditRecord` for each keyed call.
+runtime `AuditRecord` for each keyed call — **polled for, with a timeout, not
+asserted once.** `agent/main.py:24-26` says records are WAL-spooled locally and
+replayed on reconnect, and the blocked path at line 87 guarantees only that the
+record was enqueued before returning. Persistence at the deployed API is
+therefore asynchronous, and a one-shot lookup after `/ask` fails a job in which
+both requests were correctly instrumented and the upload was merely slow.
 
 Prompt and timestamp are not enough to attribute one. This job points at the
 **shared deployed** API, where `drift-sim.yml` and any manual dispatch send the
@@ -426,7 +447,10 @@ when everything works. Concretely, before the suite is considered done:
   says it is — in the trace detail's per-evaluator scores — so that is where it is
   asserted. The review test decides the PII item, which is the item the README's
   own journey decides.
-- Pointing `sengol-verify` at a tampered pack makes the evidence test red.
+- Pointing the **CLI-service verifier** — `sengol audit verify --offline` — at a
+  tampered pack makes the evidence test red. It has to be that command and not
+  `sengol-verify`, which is the one the suite cannot run; a mutation check that
+  cannot be performed demonstrates nothing.
 - Seeding nothing makes the Console tests red rather than passing on an empty
   page.
 
