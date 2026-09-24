@@ -6,9 +6,10 @@ SENGOL_TENANT_ID ?= acme-bank-ca
 SENGOL_AUDIT_URI ?= api-server
 DAYS ?= 7
 COUNT ?= 20
+SENGOL_SRC ?= ../sengol
 
 .PHONY: seed demo live export-evidence pre-deploy-check test-ci-pass test-happy test-pii-fail \
-        verify-audit open-console replay-delegation-trace up check-drift simulate-drift simulate-day
+        verify-audit open-console replay-delegation-trace up wheel check-drift simulate-drift simulate-day
 
 ## --- The 15-minute journey ------------------------------------------------
 
@@ -133,7 +134,17 @@ replay-delegation-trace:
 ## --- Deploy + Drift detection & alerts (self-driving demo) ------------------
 
 ## Start the stack (postgres + sengol-api + rag-advisor) — persistent audit store.
-up:
+## Build the SDK wheel into the agent's build context. `sengol` is proprietary
+## from 2.0 and is published to no public index, so the image installs from
+## this file rather than from PyPI. Re-run whenever the SDK tree changes.
+wheel:
+	@test -d "$(SENGOL_SRC)" || { \
+	  echo "SENGOL_SRC=$(SENGOL_SRC) is not a directory; point it at a sengol checkout"; \
+	  exit 1; }
+	rm -rf agent/vendor && mkdir -p agent/vendor
+	cd "$(SENGOL_SRC)" && uv build --wheel --out-dir "$(CURDIR)/agent/vendor"
+
+up: wheel
 	docker compose up -d
 
 # Export the API endpoint/token/tenant/audit-uri for the drift-target recipes.
